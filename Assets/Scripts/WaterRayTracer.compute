@@ -1,0 +1,333 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Ray Tracer based loosely on http://blog.three-eyed-games.com/2018/05/03/gpu-ray-tracing-in-unity-part-1/
+// HDRI texture fom https://polyhaven.com/a/spiaggia_di_mondello
+
+RWTexture2D<float4> Result;
+Texture2D<float4> skybox;
+SamplerState sampler_skybox;
+float4x4 CamToWorld;
+float4x4 CamInvProj;
+float4 directionalLight;
+static const float PI = 3.14159265f;
+static const float INF = 1. / 0.;
+
+
+float detail;
+float water_iof; //ind of refraction
+float4 water_color;
+StructuredBuffer<float3> spheres;
+float sphere_radius;
+float3 minBounds;
+float3 maxBounds;
+float3 boundsCenter;
+float k_smooth;
+
+
+struct Ray
+{
+    float3 pos;
+    float3 dir;
+    float3 energy;
+    bool inWater;
+    uint bounces;
+};
+
+Ray CreateRay(float3 start, float3 dir)
+{
+    Ray newRay;
+    newRay.pos = start;
+    newRay.dir = dir;
+    newRay.energy = 1.0f;
+    newRay.inWater = false;
+    newRay.bounces = 0;
+    return newRay;
+}
+
+Ray CreateCameraRay(float2 uv)
+{
+    // Transform the camera origin to world space
+    float3 pos = mul(CamToWorld, float4(0.0f, 0.0f, 0.0f, 1.0f)).xyz;
+
+    // Invert the perspective projection of the view-space position
+    float3 dir = mul(CamInvProj, float4(uv, 0.0f, 1.0f)).xyz;
+    // Transform the direction from camera to world space and normalize
+    dir = mul(CamToWorld, float4(dir, 0.0f)).xyz;
+    dir = normalize(dir);
+
+    return CreateRay(pos, dir);
+}
+
+struct RayHit
+{
+    float3 pos;
+    float dist;
+    float3 normal;
+    bool water;
+    float3 color;
+    float3 specular;
+};
+
+RayHit CreateRayHit()
+{
+    RayHit hit;
+    hit.pos = float3(0.f, 0.f, 0.f);
+    hit.dist = INF;
+    hit.normal = float3(0.f, 0.f, 0.f);
+    hit.water = false;
+    hit.color = float3(0.0f, 0.0f, 0.0f);
+
+    return hit;
+}
+
+float2 distToSpheres(float3 pos)
+{
+    uint numSpheres, stride;
+    spheres.GetDimensions(numSpheres, stride);
+    float min = INF;
+    float min2 = INF;
+    float temp;
+    float3 disp;
+
+    for (uint i = 0; i < numSpheres; i++)
+    {
+        disp = spheres[i] - pos;
+        temp = disp.x * disp.x + disp.y * disp.y + disp.z * disp.z;
+        if (temp < min)
+        {
+            min2 = min;
+            min = temp;
+        }
+        else if (temp < min2)
+        {
+            min2 = temp;
+        }
+    }
+
+    return float2(min, min2);
+}
+
+bool inBounds(float3 pos)
+{
+    pos = pos - boundsCenter;
+    bool inX = pos.x > minBounds.x && pos.x < maxBounds.x;
+    bool inY = pos.y > minBounds.y && pos.y < maxBounds.y;
+    bool inZ = pos.z > minBounds.z && pos.z < maxBounds.z;
+    return inX && inY && inZ;
+}
+
+//cubic smoothing technique from https://www.iquilezles.org/www/articles/smin/smin.htm
+float smoothDist(float a, float b)
+{
+    float h = max(k_smooth - abs(a - b), 0.f) / k_smooth;
+    return min(a, b) - h * h * h * k_smooth / 6.0f;
+}
+
+float smoothSpheresDist(float3 pos)
+{
+    float2 min = distToSpheres(pos);
+    if (min.x == INF)
+    {
+        return INF;
+    }
+    if (min.y == INF)
+    {
+        return sqrt(min.x) - sphere_radius;
+    }
+    return smoothDist(sqrt(min.x) - sphere_radius, sqrt(min.y) - sphere_radius);
+}
+
+//find normal by taking gradient of the distance function
+//outlined here: https://computergraphics.stackexchange.com/questions/8093/how-to-compute-normal-of-surface-from-implicit-equation-for-ray-marching
+float3 GetNormal(float3 pos)
+{
+    float eps = 0.01f;
+    float val = smoothSpheresDist(pos);
+    float dx = smoothSpheresDist(pos + float3(eps, 0.f, 0.f));
+    float dy = smoothSpheresDist(pos + float3(0.f, eps, 0.f));
+    float dz = smoothSpheresDist(pos + float3(0.f, 0.f, eps));
+    float3 norm = (float3(dx, dy, dz) - val) / eps;
+    return normalize(norm);
+}
+
+void MarchRay(Ray ray, inout RayHit hit)
+{
+    float dist = 0.f;
+    float step = smoothSpheresDist(ray.pos);
+
+    while (step > detail)
+    {
+        dist += step;
+        ray.pos += ray.dir * step;
+        if (dist > 999.0f)
+        {
+            return;
+        }
+        step = smoothSpheresDist(ray.pos);
+    }
+
+    if (dist > hit.dist)
+    {
+        return;
+    }
+
+    hit.dist = dist;
+    hit.pos = ray.pos;
+    hit.normal = GetNormal(hit.pos);
+    hit.color = water_color.xyz;
+    hit.specular = float3(0.2f, 0.2f, 0.2f);
+    hit.water = true;
+}
+
+void MarchRayWater(Ray ray, inout RayHit hit)
+{
+    float dist = 0.f;
+    float step = -smoothSpheresDist(ray.pos);
+
+    while (step > detail)
+    {
+        dist += step;
+        ray.pos += ray.dir * step;
+        if (dist > 999.0f)
+        {
+            return;
+        }
+        step = -smoothSpheresDist(ray.pos);
+    }
+
+    if (dist > hit.dist)
+    {
+        return;
+    }
+
+    hit.dist = dist;
+    hit.pos = ray.pos;
+    hit.normal = GetNormal(hit.pos);
+    hit.color = water_color.xyz;
+    hit.specular = float3(0.5f, 0.5f, 0.5f);
+    hit.water = true;
+}
+
+void IntersectGroundPlane(Ray ray, inout RayHit hit)
+{
+    float dist = -ray.pos.y / ray.dir.y;
+    if (dist < 0.f || dist > hit.dist)
+    {
+        return;
+    }
+
+    hit.dist = dist;
+    hit.pos = ray.pos + dist * ray.dir;
+    hit.normal = float3(0.0f, (float)sign(ray.pos.y), 0.0f);
+    hit.color = float3(0.75f, 0.75f, 0.75f);
+    hit.water = false;
+    hit.specular = float3(0.01f, 0.01f, 0.01f);
+}
+
+RayHit Trace(inout Ray ray)
+{
+    RayHit bestHit = CreateRayHit();
+
+    if (ray.inWater)
+    {
+        MarchRayWater(ray, bestHit);
+    }
+    else
+    {
+        MarchRay(ray, bestHit);
+    }
+    IntersectGroundPlane(ray, bestHit);
+
+    return bestHit;
+}
+
+float3 Shade(inout Ray ray, RayHit hit)
+{
+    if (hit.dist < INF)
+    {
+        ray.pos = hit.pos + hit.normal * 0.001f;
+        ray.energy *= hit.specular;
+
+        return saturate(dot(hit.normal, directionalLight.xyz) * -1) * directionalLight.w * hit.color;
+    }
+    else
+    {
+        ray.energy = 0.0f;
+
+        //Sample the skybox and write it
+        float theta = acos(ray.dir.y) / -PI;
+        float phi = atan2(ray.dir.x, -ray.dir.z) / -PI * 0.5f;
+        return skybox.SampleLevel(sampler_skybox, float2(phi, theta), 0).xyz;
+    }
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    uint width, height;
+    Result.GetDimensions(width, height);
+
+    // Transform pixel to [-1,1] range
+    float2 uv = float2((id.xy + float2(0.5f, 0.5f)) / float2(width, height) * 2.0f - 1.0f);
+
+    // Get a ray for the UVs
+    Ray ray = CreateCameraRay(uv);
+
+    uint bounces = 2;
+
+    Ray toTrace[8];
+    uint numRays = 1;
+
+    toTrace[0] = ray;
+    Ray curr;
+    Ray newRay;
+    RayHit hit;
+    float3 result = float3(0.0f, 0.0f, 0.0f);
+    while (numRays > 0)
+    {
+        numRays -= 1;
+        curr = toTrace[numRays];
+
+        if (!any(curr.energy))
+        {
+            continue;
+        }
+
+        hit = Trace(curr);
+        result += curr.energy * Shade(curr, hit);
+
+        if (curr.bounces >= bounces)
+        {
+            continue;
+        }
+
+        if (hit.water)
+        {
+            newRay = curr;
+            if (curr.inWater)
+            {
+                newRay.dir = refract(curr.dir, hit.normal, 1.0f / water_iof);
+            }
+            else
+            {
+                newRay.dir = refract(curr.dir, hit.normal, water_iof);
+            }
+            newRay.inWater = !newRay.inWater;
+            newRay.pos -= hit.normal * 2 * detail;
+            newRay.bounces += 1;
+            toTrace[numRays] = newRay;
+            numRays++;
+
+            curr.energy *= 0.1f;
+        }
+
+        curr.dir = reflect(curr.dir, hit.normal);
+        curr.pos = curr.pos + hit.normal * 0.001f;
+        curr.bounces += 1;
+        toTrace[numRays] = curr;
+        numRays++;
+    }
+
+    Result[id.xy] = float4(result, 1);
+}

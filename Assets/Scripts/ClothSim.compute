@@ -1,0 +1,121 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+struct Node
+{
+    float3 oldPos;
+    float3 oldVel;
+    float3 pos;
+    float3 vel;
+    int row;
+    int col;
+    int up;
+    int right;
+    int down;
+    int left;
+    int anchor;
+};
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWStructuredBuffer<Node> nodes;
+float l0;
+float k_spring;
+float k_sdrag;
+float k_adrag;
+float grav;
+float wind;
+float dt;
+float3 obstPos;
+float3 obstVel;
+float obstRadius;
+float absorbtion;
+int cols;
+
+float3 GetContr(Node node, Node other, float3 newPos, float3 newVel)
+{
+    float3 l = newPos - other.oldPos;
+    float3 acc = -k_spring * (l - l0 * normalize(l));
+    if (length(l) > 0.01f)
+    {
+        acc -= k_sdrag * dot(newVel - other.oldVel, l) * normalize(l);
+    }
+
+    return acc;
+}
+
+float3 GetAcc(Node node, float3 newPos, float3 newVel)
+{
+    float3 acc = float3(0.0f, 0.0f, 0.0f);
+    Node other;
+
+    if (node.up)
+    {
+        other = nodes[cols * (node.row - 1) + node.col];
+        acc += GetContr(node, other, newPos, newVel);
+    }
+
+    if (node.right)
+    {
+        other = nodes[cols * node.row + 1 + node.col];
+        acc += GetContr(node, other, newPos, newVel);
+    }
+
+    if (node.down)
+    {
+        other = nodes[cols * (node.row + 1) + node.col];
+        acc += GetContr(node, other, newPos, newVel);
+    }
+
+    if (node.left)
+    {
+        other = nodes[cols * node.row - 1 + node.col];
+        acc += GetContr(node, other, newPos, newVel);
+    }
+
+    acc += float3(0.f, -grav, wind);
+    acc -= k_adrag * newVel;
+
+    return acc;
+}
+
+void RK4(inout Node node)
+{
+    float3 newVel;
+    float3 k1 = GetAcc(node, node.pos, node.vel);
+    newVel = node.vel + k1 * dt / 2.0f;
+    float3 k2 = GetAcc(node, node.pos + newVel * dt / 2.0f, newVel);
+    newVel = node.vel + k2 * dt / 2.0f;
+    float3 k3 = GetAcc(node, node.pos + newVel * dt / 2.0f, newVel);
+    newVel = node.vel + k3 * dt;
+    float3 k4 = GetAcc(node, node.pos + newVel * dt, newVel);
+    node.vel += dt / 6.0f * (k1 + 2.0f * k2 + 2.0f * k3 + k4);
+    node.pos += dt * node.vel;
+}
+
+[numthreads(8,8,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+    Node node = nodes[cols * id.x + id.y];
+    if (node.anchor)
+    {
+        return;
+    }
+
+    RK4(node);
+
+    float3 dir = node.pos - obstPos;
+    if (length(dir) < obstRadius)
+    {
+        node.pos = obstPos + normalize(dir) * obstRadius * 1.01f;
+        node.vel = node.vel - (1.f + absorbtion) * normalize(dir) * dot(normalize(dir), node.vel);
+        if (length(obstVel) > 0.01f)
+        {
+            node.vel = node.vel + normalize(dir) * dot(normalize(dir), obstVel);
+        }
+    }
+
+    node.oldPos = node.pos;
+    node.oldVel = node.vel;
+    nodes[cols * id.x + id.y] = node;
+}
