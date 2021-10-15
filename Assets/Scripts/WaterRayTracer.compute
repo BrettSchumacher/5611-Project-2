@@ -31,7 +31,7 @@ struct Ray
     float3 dir;
     float3 energy;
     bool inWater;
-    uint bounces;
+    int bounces;
 };
 
 Ray CreateRay(float3 start, float3 dir)
@@ -83,17 +83,20 @@ RayHit CreateRayHit()
 
 float2 distToSpheres(float3 pos)
 {
+    float fac = 5.0f;
     uint numSpheres, stride;
     spheres.GetDimensions(numSpheres, stride);
     float min = INF;
     float min2 = INF;
     float temp;
     float3 disp;
+    float3 modPos;
 
     for (uint i = 0; i < numSpheres; i++)
     {
-        disp = spheres[i] - pos;
-        temp = disp.x * disp.x + disp.y * disp.y + disp.z * disp.z;
+        modPos = float3(fmod(pos.x, fac) + spheres[i].x - 0.5f*fac, pos.y, fmod(pos.z, fac) + spheres[i].z - 0.5f*fac);
+        disp = spheres[i] - modPos;
+        temp = length(disp) - sphere_radius;
         if (temp < min)
         {
             min2 = min;
@@ -133,21 +136,20 @@ float smoothSpheresDist(float3 pos)
     }
     if (min.y == INF)
     {
-        return sqrt(min.x) - sphere_radius;
+        return min.x;
     }
-    return smoothDist(sqrt(min.x) - sphere_radius, sqrt(min.y) - sphere_radius);
+    return smoothDist(min.x, min.y);
 }
 
 //find normal by taking gradient of the distance function
 //outlined here: https://computergraphics.stackexchange.com/questions/8093/how-to-compute-normal-of-surface-from-implicit-equation-for-ray-marching
 float3 GetNormal(float3 pos)
 {
-    float eps = 0.01f;
-    float val = smoothSpheresDist(pos);
-    float dx = smoothSpheresDist(pos + float3(eps, 0.f, 0.f));
-    float dy = smoothSpheresDist(pos + float3(0.f, eps, 0.f));
-    float dz = smoothSpheresDist(pos + float3(0.f, 0.f, eps));
-    float3 norm = (float3(dx, dy, dz) - val) / eps;
+    float eps = 0.0001f;
+    float dx = smoothSpheresDist(pos + float3(eps, 0.f, 0.f)) - smoothSpheresDist(pos - float3(eps, 0.f, 0.f));
+    float dy = smoothSpheresDist(pos + float3(0.f, eps, 0.f)) - smoothSpheresDist(pos - float3(0.f, eps, 0.f));
+    float dz = smoothSpheresDist(pos + float3(0.f, 0.f, eps)) - smoothSpheresDist(pos - float3(0.f, 0.f, eps));
+    float3 norm = (float3(dx, dy, dz)) / (2.f * eps);
     return normalize(norm);
 }
 
@@ -176,36 +178,36 @@ void MarchRay(Ray ray, inout RayHit hit)
     hit.pos = ray.pos;
     hit.normal = GetNormal(hit.pos);
     hit.color = water_color.xyz;
-    hit.specular = float3(0.2f, 0.2f, 0.2f);
+    hit.specular = float3(0.1f, 0.1f, 0.1f);
     hit.water = true;
 }
 
+
 void MarchRayWater(Ray ray, inout RayHit hit)
 {
-    float dist = 0.f;
-    float step = -smoothSpheresDist(ray.pos);
+    //move ray far out and go back to water
+    float3 startPos = ray.pos;
+    ray.pos += ray.dir * 999.f;
+    ray.dir *= -1;
+    RayHit waterHit = CreateRayHit();
+    MarchRay(ray, waterHit);
 
-    while (step > detail)
+    if (waterHit.dist < INF)
     {
-        dist += step;
-        ray.pos += ray.dir * step;
-        if (dist > 999.0f)
-        {
-            return;
-        }
-        step = -smoothSpheresDist(ray.pos);
+        return;
     }
-
+    
+    float dist = length(startPos - hit.pos);
     if (dist > hit.dist)
     {
         return;
     }
 
     hit.dist = dist;
-    hit.pos = ray.pos;
-    hit.normal = GetNormal(hit.pos);
+    hit.pos = waterHit.pos;
+    hit.normal = waterHit.normal;
     hit.color = water_color.xyz;
-    hit.specular = float3(0.5f, 0.5f, 0.5f);
+    hit.specular = waterHit.specular;
     hit.water = true;
 }
 
@@ -273,34 +275,46 @@ void CSMain (uint3 id : SV_DispatchThreadID)
 
     // Get a ray for the UVs
     Ray ray = CreateCameraRay(uv);
+    RayHit hit;
+    int bounces = 2;
 
-    uint bounces = 2;
+    float3 result = float3(0.0f, 0.0f, 0.0f);
+    for (int i = 0; i < bounces; i++)
+    {
+        hit = Trace(ray);
+        result += ray.energy * Shade(ray, hit);
+        
+        if (!any(ray.energy))
+        {
+            break;
+        }
 
-    Ray toTrace[8];
-    uint numRays = 1;
+        ray.dir = reflect(ray.dir, hit.normal);
+        ray.pos += hit.normal * 0.01f;
+    }
+
+
+    /*
+    int rayCount = 0;
+    Ray toTrace[7];
+    int numRays = 1;
 
     toTrace[0] = ray;
     Ray curr;
     Ray newRay;
-    RayHit hit;
-    float3 result = float3(0.0f, 0.0f, 0.0f);
-    while (numRays > 0)
+    while (numRays > 0 && rayCount < 7)
     {
+        rayCount++;
         numRays -= 1;
         curr = toTrace[numRays];
 
-        if (!any(curr.energy))
+        if (!any(curr.energy) || curr.bounces >= bounces)
         {
             continue;
         }
 
         hit = Trace(curr);
         result += curr.energy * Shade(curr, hit);
-
-        if (curr.bounces >= bounces)
-        {
-            continue;
-        }
 
         if (hit.water)
         {
@@ -314,10 +328,9 @@ void CSMain (uint3 id : SV_DispatchThreadID)
                 newRay.dir = refract(curr.dir, hit.normal, water_iof);
             }
             newRay.inWater = !newRay.inWater;
-            newRay.pos -= hit.normal * 2 * detail;
             newRay.bounces += 1;
             toTrace[numRays] = newRay;
-            numRays++;
+            numRays += 1;
 
             curr.energy *= 0.1f;
         }
@@ -326,8 +339,8 @@ void CSMain (uint3 id : SV_DispatchThreadID)
         curr.pos = curr.pos + hit.normal * 0.001f;
         curr.bounces += 1;
         toTrace[numRays] = curr;
-        numRays++;
-    }
+        numRays += 1;
+    }*/
 
     Result[id.xy] = float4(result, 1);
 }

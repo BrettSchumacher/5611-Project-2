@@ -23,9 +23,14 @@ public class Movement : MonoBehaviour
     }
 
     // Update is called once per frame
-    void Update()
+    public void UpdateMove(bool paused, float dt)
     {
-        HandleMovement(moveTarget);
+        if (paused && moveTarget != gameObject)
+        {
+            moveTarget = gameObject;
+        }
+
+        HandleMovement(moveTarget, dt);
         HandleLook();
 
         if (Input.GetKey(KeyCode.Escape))
@@ -41,12 +46,12 @@ public class Movement : MonoBehaviour
             if (moveTarget != obstacle)
             {
                 lookTarget = obstacle;
-                obstacle.GetComponent<MeshRenderer>().material.color = Color.gray;
+                obstacle.GetComponent<MeshRenderer>().material.color = Color.black;
             }
             else
             {
                 lookTarget = null;
-                obstacle.GetComponent<MeshRenderer>().material.color = Color.cyan;
+                obstacle.GetComponent<MeshRenderer>().material.color = Color.white;
             }
         }
         else
@@ -54,11 +59,11 @@ public class Movement : MonoBehaviour
             lookTarget = null;
             if (moveTarget == obstacle)
             {
-                obstacle.GetComponent<MeshRenderer>().material.color = Color.cyan;
+                obstacle.GetComponent<MeshRenderer>().material.color = Color.white;
             }
             else
             {
-                obstacle.GetComponent<MeshRenderer>().material.color = Color.white;
+                obstacle.GetComponent<MeshRenderer>().material.color = Color.black;
             }
         }
 
@@ -78,7 +83,7 @@ public class Movement : MonoBehaviour
         }
     }
 
-    void HandleMovement(GameObject target)
+    void HandleMovement(GameObject target, float dt)
     {
         Vector3 vel = Vector3.zero;
         Vector3 forward = Vector3.ProjectOnPlane(transform.forward, Vector3.up).normalized;
@@ -122,7 +127,7 @@ public class Movement : MonoBehaviour
             obstVel = Vector3.zero;
         }
 
-        moveTarget.transform.position += vel * Time.deltaTime;
+        moveTarget.transform.position += vel * dt;
     }
 
     void HandleLook()

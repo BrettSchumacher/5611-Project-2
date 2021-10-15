@@ -1,0 +1,168 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel CSMain
+
+// Create a RenderTexture with enableRandomWrite flag and set it
+// with cs.SetTexture
+RWStructuredBuffer<float3> spherePos;
+RWStructuredBuffer<float3> oldSpherePos;
+RWStructuredBuffer<float3> sphereVel;
+RWStructuredBuffer<float3> oldSphereVel;
+float3 minBounds;
+float3 maxBounds;
+float influenceRad;
+float k_cohesion;
+float k_surf;
+float cohesion_falloff;
+float surf_falloff;
+float goal_pressure;
+float grav;
+float drag;
+float boundaryAbs;
+int numSpheres;
+float dt;
+
+float3 x1, x2, y1, y2, z1, z2;
+
+float3 GetContr(float3 disp, float pressure_main, float pressure_surf)
+{
+	float3 acc;
+
+	float falloff = 1 - length(disp) / influenceRad;
+
+	acc = (k_cohesion * (pressure_main - goal_pressure) + k_surf * pressure_surf * falloff) * falloff * normalize(disp);
+
+	//return acc * dt * dt;
+	return acc * dt * dt;
+}
+
+void AddPressure(float3 testPos, float3 otherPos, inout float pressure_main, inout float pressure_surf)
+{
+	float scaled_dist = length(otherPos - testPos) / influenceRad;
+	float eps = 0.5f;
+	if (scaled_dist < 1)
+	{
+		pressure_surf += (1.f - scaled_dist) * (1.f - scaled_dist) * (1.f - scaled_dist);
+		scaled_dist *= scaled_dist; 
+		pressure_main += 1.f / (cohesion_falloff * scaled_dist + eps);
+	}
+}
+
+void UpdatePos(inout float3 newPos, float3 testPos, float3 otherPos, float pressure_main, float pressure_surf)
+{
+	float3 disp = otherPos - testPos;
+
+	if (length(disp) < influenceRad)
+	{
+		newPos += GetContr(disp, pressure_main, pressure_surf);
+	}
+}
+
+void AddBoundaries(float3 testPos, inout float pressure_main, inout float pressure_surf)
+{
+	AddPressure(testPos, x1, pressure_main, pressure_surf);
+	AddPressure(testPos, x2, pressure_main, pressure_surf);
+	AddPressure(testPos, y1, pressure_main, pressure_surf);
+	AddPressure(testPos, y2, pressure_main, pressure_surf);
+	AddPressure(testPos, z1, pressure_main, pressure_surf);
+	AddPressure(testPos, z2, pressure_main, pressure_surf);
+}
+
+void UpdateBoundaries(inout float3 newPos, float3 testPos, float pressure_main, float pressure_surf)
+{
+	UpdatePos(newPos, testPos, x1, pressure_main, pressure_surf);
+	UpdatePos(newPos, testPos, x2, pressure_main, pressure_surf);
+	UpdatePos(newPos, testPos, y1, pressure_main, pressure_surf);
+	UpdatePos(newPos, testPos, y2, pressure_main, pressure_surf);
+	UpdatePos(newPos, testPos, z1, pressure_main, pressure_surf);
+	UpdatePos(newPos, testPos, z2, pressure_main, pressure_surf);
+}
+
+void Update(int ind)
+{
+	float3 testPos = spherePos[ind] + dt * sphereVel[ind];
+	float3 newPos = testPos;
+	float pressure_main = 0.f;
+	float pressure_surf = 0.f;
+	float scaled_dist;
+
+	//calc pressures
+	for (int i = 0; i < numSpheres; i++)
+	{
+		if (i == ind) continue;
+		AddPressure(testPos, oldSpherePos[i], pressure_main, pressure_surf);
+	}
+	//AddBoundaries(testPos, pressure_main, pressure_surf);
+
+	float3 disp;
+
+	//inter-water forces
+	for (i = 0; i < numSpheres; i++)
+	{
+		if (i == ind) continue;
+		UpdatePos(newPos, testPos, oldSpherePos[i], pressure_main, pressure_surf);
+	}
+
+	//UpdateBoundaries(newPos, testPos, pressure_main, pressure_surf);
+
+	//grav
+	newPos -= dt * dt * float3(0.f, grav, 0.f);
+	sphereVel[ind] = (newPos - spherePos[ind]) / dt;
+	if (length(sphereVel[ind]) > 0.01f)
+	{
+		sphereVel[ind] -= drag * pressure_main * normalize(sphereVel[ind]) * dt;
+	}
+	spherePos[ind] = newPos;
+}
+
+[numthreads(64,1,1)]
+void CSMain (uint3 id : SV_DispatchThreadID)
+{
+	oldSpherePos[id.x] = spherePos[id.x];
+	oldSphereVel[id.x] = sphereVel[id.x];
+
+	x1 = spherePos[id.x]; x1.x = minBounds.x;
+	x2 = spherePos[id.x]; x2.x = maxBounds.x;
+
+	y1 = spherePos[id.x]; y1.y = minBounds.y;
+	y2 = spherePos[id.x]; y2.y = maxBounds.y;
+
+	z1 = spherePos[id.x]; z1.z = minBounds.z;
+	z2 = spherePos[id.x]; z2.z = maxBounds.z;
+
+
+	Update(id.x);
+
+	//check boundary
+	if (spherePos[id.x].x < minBounds.x)
+	{
+		spherePos[id.x].x = minBounds.x + 0.001f;
+		sphereVel[id.x].x *= 0;
+	}
+	else if (spherePos[id.x].x > maxBounds.x)
+	{
+		spherePos[id.x].x = maxBounds.x - 0.001f;
+		sphereVel[id.x].x *= 0;
+	}
+
+	if (spherePos[id.x].y < minBounds.y)
+	{
+		spherePos[id.x].y = minBounds.y + 0.001f;
+		sphereVel[id.x].y *= -boundaryAbs;
+	}
+	else if (spherePos[id.x].y > maxBounds.y)
+	{
+		spherePos[id.x].y = maxBounds.y - 0.001f;
+		sphereVel[id.x].y *= -boundaryAbs;
+	}
+
+	if (spherePos[id.x].z < minBounds.z)
+	{					
+		spherePos[id.x].z = minBounds.z + 0.001f;
+		sphereVel[id.x].z *= 0;
+	}
+	else if (spherePos[id.x].z > maxBounds.z)
+	{
+		spherePos[id.x].z = maxBounds.z - 0.001f;
+		sphereVel[id.x].z *= 0;
+	}
+}
