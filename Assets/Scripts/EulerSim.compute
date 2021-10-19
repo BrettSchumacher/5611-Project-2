@@ -1,0 +1,196 @@
+// Each #kernel tells which function to compile; you can have many kernels
+#pragma kernel UpdateMids
+#pragma kernel UpdateMain
+#pragma kernel SetVals
+
+RWStructuredBuffer<float> h;
+RWStructuredBuffer<float> hu;
+RWStructuredBuffer<float> hv;
+float grav;
+float drag;
+
+float dx;
+float dt;
+uint rows;
+uint cols;
+uint numPtcls;
+
+uint row(uint ind)
+{
+    return ind / cols;
+}
+
+uint col(uint ind)
+{
+    return ind % rows;
+}
+
+float h_mid(uint ind)
+{
+    return h[ind + numPtcls];
+}
+
+float hu_mid(uint ind)
+{
+    return hu[ind + numPtcls];
+}
+
+float hv_mid(uint ind)
+{
+    return hv[ind + numPtcls];
+}
+
+void UpdateHMid(uint ind)
+{
+    float dhu_dx = hu[ind + 1] - hu[ind];
+    float dhv_dy = hv[ind + cols] - hv[ind];
+    
+    h[ind + numPtcls] = h[ind] - (1.f - drag) * dt * (dhu_dx + dhv_dy) / (2.f * dx);
+}
+
+void UpdateHUMid(uint ind)
+{
+    float dhu2_dx = hu[ind + 1] * hu[ind + 1] / h[ind + 1] - hu[ind] * hu[ind] / h[ind];
+    float dh2_dx = h[ind + 1] * h[ind + 1] - h[ind] * h[ind];
+    float dhuv_dy = hu[ind + cols] * hv[ind + cols] / h[ind + cols] - hu[ind] * hv[ind] / h[ind];
+    
+    hu[ind + numPtcls] = hu[ind] - (1.f - drag) * dt * (dhu2_dx + 0.5f * grav * dh2_dx + dhuv_dy) / (2.f * dx);
+}
+
+void UpdateHVMid(uint ind)
+{
+    float dhv2_dy = hv[ind + cols] * hv[ind + cols] / h[ind + cols] - hv[ind] * hv[ind] / h[ind];
+    float dh2_dy = h[ind + cols] * h[ind + cols] - h[ind] * h[ind];
+    float dhuv_dx = hu[ind + 1] * hv[ind + 1] / h[ind + 1] - hu[ind] * hv[ind] / h[ind];
+    
+    hv[ind + numPtcls] = hv[ind] - (1.f - drag) * dt * (dhv2_dy + 0.5f * grav * dh2_dy + dhuv_dx) / (2.f * dx);
+}
+
+//using dh/dt = -dhu/dx - dhv/dy
+void UpdateH(uint ind)
+{
+    float dhu_dx = hu_mid(ind) - hu_mid(ind - 1);
+    float dhv_dy = hv_mid(ind) - hv_mid(ind - cols);
+    
+    h[ind + 2 * numPtcls] = h[ind] - (1.f - drag) * dt * (dhu_dx + dhv_dy) / dx;
+}
+
+//using dhu/dt = -dhu^2/dx - 1/2g*dh^2/dx - dhuv/dy
+void UpdateHU(uint ind)
+{
+    float dhu2_dx = hu_mid(ind) * hu_mid(ind) / h_mid(ind) - hu_mid(ind - 1) * hu_mid(ind - 1) / h_mid(ind - 1);
+    float dh2_dx = h_mid(ind) * h_mid(ind) - h_mid(ind - 1) * h_mid(ind - 1);
+    float dhuv_dy = hu_mid(ind) * hv_mid(ind) / h_mid(ind) - hu_mid(ind - cols) * hv_mid(ind - cols) / h_mid(ind - cols);
+    
+    hu[ind + 2 * numPtcls] = hu[ind] - (1.f - drag) * dt * (dhu2_dx + 0.5f * grav * dh2_dx + dhuv_dy) / dx;
+
+}
+
+//using dhv/dt = -dhv^2/dy - 1/2g*dh^2/dy - dhuv/dx
+void UpdateHV(uint ind)
+{
+    float dhv2_dy = hv_mid(ind) * hv_mid(ind) / h_mid(ind) - hv_mid(ind - cols) * hv_mid(ind - cols) / h_mid(ind - cols);
+    float dh2_dy = h_mid(ind) * h_mid(ind) - h_mid(ind - cols) * h_mid(ind - cols);
+    float dhuv_dx = hu_mid(ind) * hv_mid(ind) / h_mid(ind) - hu_mid(ind - 1) * hv_mid(ind - 1) / h_mid(ind - 1);
+    
+    hv[ind + 2 * numPtcls] = hv[ind] - (1.f - drag) * dt * (dhv2_dy + 0.5f * grav * dh2_dy + dhuv_dx) / dx;
+}
+
+void EnforceLimit(uint ind)
+{
+    if (h[ind] < 0)
+    {
+        h[ind] = 0;
+    }
+
+}
+
+[numthreads(64, 1, 1)]
+void UpdateMids (uint3 id : SV_DispatchThreadID)
+{
+    uint ind = id.x;
+    
+    //skip if on the edge
+    if (row(ind) >= rows - 1 || 
+        col(ind) >= cols - 1 ||
+        ind >= numPtcls)   
+    {
+        return;
+    }
+    
+    UpdateHMid(ind);
+    UpdateHUMid(ind);
+    UpdateHVMid(ind);
+    
+    EnforceLimit(ind + numPtcls);
+}
+
+[numthreads(64, 1, 1)]
+void UpdateMain(uint3 id : SV_DispatchThreadID)
+{
+    uint ind = id.x;
+    
+    if (row(ind) <= 0 || row(ind) >= rows - 1 ||
+        col(ind) <= 0 || col(ind) >= cols - 1 ||
+        ind >= numPtcls)
+    {
+        return;
+    }
+    
+        
+    UpdateH(ind);
+    UpdateHU(ind);
+    UpdateHV(ind);
+
+    EnforceLimit(ind + 2 * numPtcls);
+}
+
+[numthreads(64, 1, 1)]
+void SetVals(uint3 id : SV_DispatchThreadID)
+{
+    uint ind = id.x;
+    
+    if (ind >= numPtcls)
+    {
+        return;
+    }
+    
+    //reflect right cell if on the left edge
+    if (col(ind) == 0)
+    {
+        h[ind] = h[ind + 1];
+        hu[ind] = -hu[ind + 1];
+        hv[ind] = -hv[ind + 1];
+    }
+    //reflect left if on right edge
+    else if (col(ind) == cols - 1)
+    {
+        h[ind] = h[ind - 1];
+        hu[ind] = -hu[ind - 1];
+        hv[ind] = -hv[ind - 1];
+    }
+    //reflect down if on top edge
+    else if (row(ind) == 0)
+    {
+        h[ind] = h[ind + cols];
+        hu[ind] = -hu[ind + cols];
+        hv[ind] = -hv[ind + cols];
+    }
+    //reflect up if on bottom edge
+    else if (row(ind) == rows - 1)
+    {
+        h[ind] = h[ind - cols];
+        hu[ind] = -hu[ind - cols];
+        hv[ind] = -hv[ind - cols];
+    }
+    //set normally if not an edge case
+    else
+    {
+        h[ind] = h[ind + 2 * numPtcls];
+        hu[ind] = hu[ind + 2 * numPtcls];
+        hv[ind] = hv[ind + 2 * numPtcls];
+    }
+    
+    EnforceLimit(ind);
+
+}

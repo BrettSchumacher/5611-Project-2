@@ -508,7 +508,7 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   moveSpeed: 3
-  sensitivity: 0.2
+  sensitivity: 5
   obstacle: {fileID: 256531084}
 --- !u!1 &1126390999
 GameObject:

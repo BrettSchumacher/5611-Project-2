@@ -70,11 +70,8 @@ public class WaterMovement : MonoBehaviour
 
     void HandleLook()
     {
-        if (prev_mouse.sqrMagnitude < 0.01f)
-        {
-            prev_mouse = Input.mousePosition;
-        }
-        Vector3 mouseDelta = Input.mousePosition - prev_mouse;
+
+        Vector2 mouseDelta = new Vector2(Input.GetAxis("Mouse X"), Input.GetAxis("Mouse Y"));
         rotY -= mouseDelta.y * sensitivity;
         rotY = Mathf.Clamp(rotY, -90f, 90f);
         float rotX = transform.eulerAngles.y + mouseDelta.x * sensitivity;

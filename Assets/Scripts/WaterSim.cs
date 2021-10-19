@@ -4,163 +4,219 @@ using UnityEngine;
 
 public class WaterSim : MonoBehaviour
 {
-    public ComputeShader waterSimShader;
-    public Light directionalLight;
-    public int numSpheres;
-
-    //ray tracer variables
-    public Color waterColor;
-
-    //simulation variables
+    public ComputeShader EulerShader;
+    public int numPtcls;
     public int passes = 1;
+    public int solverIters = 10;
     public float influence_radius;
-    public float k_cohesion;
-    public float k_surf;
-    public float cohesion_falloff;
-    public float surf_falloff;
-    public float goal_pressure;
-    public float drag;
-    public float grav;
-    public float boundaryAbs = 0.5f;
-    public BoxCollider box;
-    public GameObject sphere;
+    public float rest_density = 1000f;
+    public float grav = 1f;
+    public float eps = 600f;
+    public float dq = 0.3f;
+    public float k_corr = 0.0001f;
+    public float spacing = 0.05f;
+    public GameObject waterPtcl;
 
-    private Camera cam;
+    private int threadGroupsX;
+    private List<Vector3> pos;
+    private List<Vector3> newPos;
+    private List<Vector3> vel;
+    private BoxCollider box;
     private Vector3 minBounds;
     private Vector3 maxBounds;
-
-    private List<Vector3> spherePos;
-    private List<Vector3> oldSpherePos;
-    private List<Vector3> sphereVel;
-    private List<Vector3> oldSphereVel;
     private List<GameObject> spheres;
+
+    //all thems buffers
+    private ComputeBuffer posBuff;
+    private ComputeBuffer newPosBuff;
+    private ComputeBuffer velBuff;
+    private ComputeBuffer scaleFacBuff;
+    private ComputeBuffer adjListsBuff;
+
 
     // Start is called before the first frame update
     void Start()
     {
+        box = GetComponent<BoxCollider>();
         minBounds = box.transform.position + box.center - (box.size / 2.0f);
         maxBounds = box.transform.position + box.center + (box.size / 2.0f);
-        cam = Camera.main;
-        GenerateSpheres();
+        GenerateFluid();
         SetShaderParams();
     }
 
-    void GenerateSpheres()
+    void GenerateFluid()
     {
-        spherePos = new List<Vector3>();
-        oldSpherePos = new List<Vector3>();
-        sphereVel = new List<Vector3>();
-        oldSphereVel = new List<Vector3>();
         spheres = new List<GameObject>();
+        pos = new List<Vector3>();
+        vel = new List<Vector3>();
+        newPos = new List<Vector3>();
 
-        GameObject tempSphere;
+        GameObject tempPtcl;
         Vector3 temp;
-        float spacing = 0.005f;
         int xNum = Mathf.FloorToInt((maxBounds.x - minBounds.x) / spacing) - 2;
         int zNum = Mathf.FloorToInt((maxBounds.z - minBounds.z) / spacing) - 2;
 
-        for (int i = 0; i < numSpheres; i++)
+        for (int i = 0; i < numPtcls; i++)
         {
             temp = new Vector3((i % xNum + 1) * spacing + minBounds.x, (i / (xNum * zNum) + 1) * spacing + minBounds.y, ((i / xNum) % zNum + 1) * spacing + minBounds.z);
-            spherePos.Add(temp);
-            oldSpherePos.Add(spherePos[i]);
-            sphereVel.Add(Vector3.zero);
-            oldSphereVel.Add(Vector3.zero);
-            tempSphere = Instantiate(sphere);
-            spheres.Add(tempSphere);
-        }
-
-        float pressure;
-        float dist;
-        //calc initial pressures
-        for (int i = 0; i < numSpheres; i++)
-        {
-            pressure = 0f;
-            for (int j = 0; j < numSpheres; j++)
-            {
-                if (i == j) continue;
-                dist = (spherePos[i] - spherePos[j]).magnitude / influence_radius;
-                if (dist < 1f)
-                {
-                    pressure += 1f / (cohesion_falloff * dist * dist + 0.5f);
-                }
-            }
-
-            print("Starting pressure " + i + ": " + pressure);
+            pos.Add(temp);
+            vel.Add(Vector3.zero);
+            newPos.Add(Vector3.zero);
+            tempPtcl = Instantiate(waterPtcl);
+            spheres.Add(tempPtcl);
         }
     }
 
     void SetShaderParams()
     {
-        waterSimShader.SetFloat("influenceRad", influence_radius);
-        waterSimShader.SetFloat("k_cohesion", k_cohesion);
-        waterSimShader.SetFloat("k_surf", k_surf);
-        waterSimShader.SetFloat("cohesion_falloff", cohesion_falloff);
-        waterSimShader.SetFloat("surf_falloff", surf_falloff);
-        waterSimShader.SetFloat("goal_pressure", goal_pressure);
-        waterSimShader.SetFloat("drag", drag);
-        waterSimShader.SetFloat("grav", grav);
-        waterSimShader.SetFloat("boundaryAbs", boundaryAbs);
-        waterSimShader.SetVector("minBounds", minBounds);
-        waterSimShader.SetVector("maxBounds", maxBounds);
+        EulerShader.SetVector("minBounds", minBounds);
+        EulerShader.SetVector("maxBounds", maxBounds);
+        EulerShader.SetFloat("rest_density", rest_density);
+        EulerShader.SetFloat("influence_radius", influence_radius);
+        EulerShader.SetFloat("grav", grav);
+        EulerShader.SetFloat("k_corr", k_corr);
+        EulerShader.SetFloat("eps", eps);
+        EulerShader.SetFloat("dq", dq);
     }
 
     // Update is called once per frame
-    void Update()
+    void FixedUpdate()
     {
-        
+        EulerShader.SetInt("numPoints", numPtcls);
+        threadGroupsX = Mathf.CeilToInt(numPtcls / 64.0f);
+        float dt = Time.fixedDeltaTime / passes;
+        EulerShader.SetFloat("dt", dt);
+        EulerShader.SetFloat("solver_dt", dt / solverIters);
+
+        SetBuffers();
+
+        float timer = Time.time;
+        int i = 0;
+        for (; i < passes; i++)
+        {
+            SinglePass(dt);
+        }
+        //print("GPU time after " + i + " passes: " + (Time.time - timer).ToString("E") + " seconds");
+
+        ReleaseBuffers();
+
+        for (i = 0; i < numPtcls; i++)
+        {
+            spheres[i].transform.position = pos[i];
+        }
     }
 
-    private void FixedUpdate()
+    void PrintPre()
     {
-        ComputeBuffer spherePosBuffer = new ComputeBuffer(spherePos.Count, 12);
-        ComputeBuffer oldSpherePosBuffer = new ComputeBuffer(spherePos.Count, 12);
-        ComputeBuffer sphereVelBuffer = new ComputeBuffer(sphereVel.Count, 12);
-        ComputeBuffer oldSphereVelBuffer = new ComputeBuffer(sphereVel.Count, 12);
-        spherePosBuffer.SetData(spherePos);
-        oldSpherePosBuffer.SetData(oldSpherePos);
-        sphereVelBuffer.SetData(sphereVel);
-        oldSphereVelBuffer.SetData(oldSphereVel);
-        waterSimShader.SetBuffer(0, "spherePos", spherePosBuffer);
-        waterSimShader.SetBuffer(0, "oldSpherePos", oldSpherePosBuffer);
-        waterSimShader.SetBuffer(0, "sphereVel", sphereVelBuffer);
-        waterSimShader.SetBuffer(0, "oldSphereVel", oldSphereVelBuffer);
-        int threadGroups = Mathf.CeilToInt(numSpheres / 64.0f);
-
-        float dt = Time.fixedDeltaTime / passes;
-        waterSimShader.SetFloat("dt", dt);
-        waterSimShader.SetInt("numSpheres", numSpheres);
-
-        for (int i = 0; i < passes; i++)
+        for (int i = 0; i < numPtcls; i++)
         {
-            waterSimShader.Dispatch(0, threadGroups, 1, 1);
+            print(i + " pre-pos: " + pos[i]);
+            print(i + " pre-vel: " + vel[i]);
+        }
+    }
+
+    void PrintPost()
+    {
+        for (int i = 0; i < numPtcls; i++)
+        {
+            print(i + " post-pos: " + pos[i]);
+            print(i + " post-vel: " + vel[i]);
+        }
+    }
+
+    void PrintMid(int ker)
+    {
+        Vector3[] temp = new Vector3[numPtcls];
+        newPosBuff.GetData(temp);
+
+        print("ker " + ker + ":");
+        for (int i = 0; i < numPtcls; i++)
+        {
+            print(i + " newPos: " + temp[i]);
+        }
+    }
+
+    void SinglePass(float dt)
+    {
+        BindBuffers(0);
+        //position initialization
+        EulerShader.Dispatch(0, threadGroupsX, 1, 1);
+
+        BindBuffers(1);
+        //adjacency list initilization
+        EulerShader.Dispatch(1, threadGroupsX, 1, 1);
+
+        //do core loop
+        for (int i = 0; i < solverIters; i++)
+        {
+            BindBuffers(2);
+            //calculate correction values and gradients
+            EulerShader.Dispatch(2, threadGroupsX, 1, 1);
+
+            BindBuffers(3);
+            //set correction factor
+            EulerShader.Dispatch(3, threadGroupsX, 1, 1);
+
+            BindBuffers(4);
+            //update position
+            EulerShader.Dispatch(4, threadGroupsX, 1, 1);
         }
 
-        Vector3[] temp = new Vector3[numSpheres];
-        spherePosBuffer.GetData(temp);
-        spherePos.Clear();
-        spherePos.AddRange(temp);
+        BindBuffers(5);
+        //finalize and apply viscosity correction
+        EulerShader.Dispatch(5, threadGroupsX, 1, 1);
+    }
 
-        oldSpherePosBuffer.GetData(temp);
-        oldSpherePos.Clear();
-        oldSpherePos.AddRange(temp);
+    void SetBuffers()
+    {
+        posBuff = new ComputeBuffer(numPtcls, 12);
+        posBuff.SetData(pos);
+        newPosBuff = new ComputeBuffer(numPtcls, 12);
+        velBuff = new ComputeBuffer(numPtcls, 12);
+        velBuff.SetData(vel);
+        scaleFacBuff = new ComputeBuffer(numPtcls, 4);
+        adjListsBuff = new ComputeBuffer(numPtcls, 4 * (20 + 20 + 3 * 20 + 1));
+    }
 
-        sphereVelBuffer.GetData(temp);
-        sphereVel.Clear();
-        sphereVel.AddRange(temp);
+    void BindBuffers(int kerID)
+    {
+        EulerShader.SetBuffer(kerID, "pos", posBuff);
+        EulerShader.SetBuffer(kerID, "newPos", newPosBuff);
+        EulerShader.SetBuffer(kerID, "vel", velBuff);
+        EulerShader.SetBuffer(kerID, "scaleFactors", scaleFacBuff);
+        EulerShader.SetBuffer(kerID, "adjLists", adjListsBuff);
+    }
 
-        oldSphereVelBuffer.GetData(temp);
-        oldSphereVel.Clear();
-        oldSphereVel.AddRange(temp);
+    void ReleaseBuffers()
+    {
+        Vector3[] temp = new Vector3[numPtcls];
 
-        spherePosBuffer.Release();
-        oldSpherePosBuffer.Release();
-        sphereVelBuffer.Release();
-        oldSphereVelBuffer.Release();
+        posBuff.GetData(temp);
+        pos.Clear();
+        pos.AddRange(temp);
+        posBuff.Release();
 
-        for (int i = 0; i < numSpheres; i++)
-        {
-            spheres[i].transform.position = spherePos[i];
-        }
+        newPosBuff.GetData(temp);
+        newPos.Clear();
+        newPos.AddRange(temp);
+        newPosBuff.Release();
+
+        velBuff.GetData(temp);
+        vel.Clear();
+        vel.AddRange(temp);
+        velBuff.Release();
+
+        scaleFacBuff.Release();
+        adjListsBuff.Release();
+    }
+
+    private void OnApplicationPause(bool pause)
+    {
+        ReleaseBuffers();
+    }
+
+    private void OnApplicationQuit()
+    {
+        ReleaseBuffers();
     }
 }

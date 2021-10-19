@@ -1,168 +1,290 @@
 // Each #kernel tells which function to compile; you can have many kernels
-#pragma kernel CSMain
+#pragma kernel InitialUpdate
+#pragma kernel SetAdjLists
+#pragma kernel SetCorrections
+#pragma kernel SetScaleFactors
+#pragma kernel RunSolver
+#pragma kernel FinalUpdate
+
+struct AdjList
+{
+    int list[20];
+    float smoothKer[20];
+    float3 kerGrad[20];
+    int num;
+};
 
 // Create a RenderTexture with enableRandomWrite flag and set it
 // with cs.SetTexture
-RWStructuredBuffer<float3> spherePos;
-RWStructuredBuffer<float3> oldSpherePos;
-RWStructuredBuffer<float3> sphereVel;
-RWStructuredBuffer<float3> oldSphereVel;
+RWStructuredBuffer<float3> pos;
+RWStructuredBuffer<float3> newPos;
+RWStructuredBuffer<float3> vel;
+RWStructuredBuffer<float> scaleFactors;
+RWStructuredBuffer<AdjList> adjLists;
+int numPoints;
 float3 minBounds;
 float3 maxBounds;
-float influenceRad;
-float k_cohesion;
-float k_surf;
-float cohesion_falloff;
-float surf_falloff;
-float goal_pressure;
+float rest_density;
+float influence_radius;
 float grav;
-float drag;
-float boundaryAbs;
-int numSpheres;
+float eps;
+float dq;
+float k_corr;
+
 float dt;
+float solver_dt;
 
-float3 x1, x2, y1, y2, z1, z2;
+static const float PI = 3.14159265f;
 
-float3 GetContr(float3 disp, float pressure_main, float pressure_surf)
+float Poly6Smooth(float r)
 {
-	float3 acc;
+    if (r >= influence_radius)
+    {
+        return 0.f;
+    }
+    float h2 = influence_radius * influence_radius;
+    float dist = h2 - r * r;
 
-	float falloff = 1 - length(disp) / influenceRad;
-
-	acc = (k_cohesion * (pressure_main - goal_pressure) + k_surf * pressure_surf * falloff) * falloff * normalize(disp);
-
-	//return acc * dt * dt;
-	return acc * dt * dt;
+    return 315.f / (64.f * PI * h2 * h2 * h2 * h2 * influence_radius) * dist * dist * dist;
 }
 
-void AddPressure(float3 testPos, float3 otherPos, inout float pressure_main, inout float pressure_surf)
+float SpikeySmooth(float r)
 {
-	float scaled_dist = length(otherPos - testPos) / influenceRad;
-	float eps = 0.5f;
-	if (scaled_dist < 1)
-	{
-		pressure_surf += (1.f - scaled_dist) * (1.f - scaled_dist) * (1.f - scaled_dist);
-		scaled_dist *= scaled_dist; 
-		pressure_main += 1.f / (cohesion_falloff * scaled_dist + eps);
-	}
+    if (r >= influence_radius)
+    {
+        return 0.f;
+    }
+    float dist = influence_radius - r;
+    float h2 = influence_radius * influence_radius;
+
+    return 15.f / (PI * h2 * h2 * h2) * dist * dist * dist;
 }
 
-void UpdatePos(inout float3 newPos, float3 testPos, float3 otherPos, float pressure_main, float pressure_surf)
+float DensityAtInd(int ind)
 {
-	float3 disp = otherPos - testPos;
+    float density = 0.f;
+    int ind2;
 
-	if (length(disp) < influenceRad)
-	{
-		newPos += GetContr(disp, pressure_main, pressure_surf);
-	}
+    for (int i = 0; i < adjLists[ind].num; i++)
+    {
+        ind2 = adjLists[ind].list[i];
+        density += adjLists[ind].smoothKer[i];
+    }
+
+    return density;
 }
 
-void AddBoundaries(float3 testPos, inout float pressure_main, inout float pressure_surf)
+float SpikeyDensityAtPos(int ind, float3 pos)
 {
-	AddPressure(testPos, x1, pressure_main, pressure_surf);
-	AddPressure(testPos, x2, pressure_main, pressure_surf);
-	AddPressure(testPos, y1, pressure_main, pressure_surf);
-	AddPressure(testPos, y2, pressure_main, pressure_surf);
-	AddPressure(testPos, z1, pressure_main, pressure_surf);
-	AddPressure(testPos, z2, pressure_main, pressure_surf);
+    float density = 0.f;
+    int ind2;
+
+    for (int i = 0; i < adjLists[ind].num; i++)
+    {
+        ind2 = adjLists[ind].list[i];
+        density += SpikeySmooth(length(newPos[ind2] - newPos[ind] + pos));
+    }
+
+    return density;
 }
 
-void UpdateBoundaries(inout float3 newPos, float3 testPos, float pressure_main, float pressure_surf)
+float Correction(int ind)
 {
-	UpdatePos(newPos, testPos, x1, pressure_main, pressure_surf);
-	UpdatePos(newPos, testPos, x2, pressure_main, pressure_surf);
-	UpdatePos(newPos, testPos, y1, pressure_main, pressure_surf);
-	UpdatePos(newPos, testPos, y2, pressure_main, pressure_surf);
-	UpdatePos(newPos, testPos, z1, pressure_main, pressure_surf);
-	UpdatePos(newPos, testPos, z2, pressure_main, pressure_surf);
+    return DensityAtInd(ind) / rest_density - 1.f;
 }
 
-void Update(int ind)
+//gradient of smoothing kernel between i and j
+float3 KernelGrad(int i, int j)
 {
-	float3 testPos = spherePos[ind] + dt * sphereVel[ind];
-	float3 newPos = testPos;
-	float pressure_main = 0.f;
-	float pressure_surf = 0.f;
-	float scaled_dist;
+    /*
+    float eps = influence_radius / 100.f;
+    float dx = SpikeyDensityAtPos(i, float3(eps, 0.f, 0.f)) - SpikeyDensityAtPos(i, float3(-eps, 0.f, 0.f));
+    float dy = SpikeyDensityAtPos(i, float3(0.f, eps, 0.f)) - SpikeyDensityAtPos(i, float3(0.f, -eps, 0.f));
+    float dz = SpikeyDensityAtPos(i, float3(0.f, 0.f, eps)) - SpikeyDensityAtPos(i, float3(0.f, 0.f, -eps));
 
-	//calc pressures
-	for (int i = 0; i < numSpheres; i++)
-	{
-		if (i == ind) continue;
-		AddPressure(testPos, oldSpherePos[i], pressure_main, pressure_surf);
-	}
-	//AddBoundaries(testPos, pressure_main, pressure_surf);
-
-	float3 disp;
-
-	//inter-water forces
-	for (i = 0; i < numSpheres; i++)
-	{
-		if (i == ind) continue;
-		UpdatePos(newPos, testPos, oldSpherePos[i], pressure_main, pressure_surf);
-	}
-
-	//UpdateBoundaries(newPos, testPos, pressure_main, pressure_surf);
-
-	//grav
-	newPos -= dt * dt * float3(0.f, grav, 0.f);
-	sphereVel[ind] = (newPos - spherePos[ind]) / dt;
-	if (length(sphereVel[ind]) > 0.01f)
-	{
-		sphereVel[ind] -= drag * pressure_main * normalize(sphereVel[ind]) * dt;
-	}
-	spherePos[ind] = newPos;
+    return float3(dx, dy, dz) / (2.f * eps);
+    */
+    float3 r = newPos[j] - newPos[i];
+    float h2 = influence_radius * influence_radius;
+    return 45.f / (PI * h2 * h2 * h2) * (influence_radius - length(r)) * (influence_radius - length(r)) * normalize(r);
 }
 
-[numthreads(64,1,1)]
-void CSMain (uint3 id : SV_DispatchThreadID)
+float SetScalingFac(int ind)
 {
-	oldSpherePos[id.x] = spherePos[id.x];
-	oldSphereVel[id.x] = sphereVel[id.x];
+    float gradientSum = 0.f;
+    float3 jGrad = 0.f; //current gradient for ptc j
+    float3 iGrad = 0.f; //sum of grads that make up gradient for ptc i
+    int ind2;
+    
+    
+    for (int i = 0; i < adjLists[ind].num; i++)
+    {
+        ind2 = adjLists[ind].list[i];
+        jGrad = adjLists[ind].kerGrad[i];
+        iGrad += jGrad;
+        gradientSum += length(jGrad) * length(jGrad);
+    }
+    
+    gradientSum += length(iGrad) * length(iGrad);
+    gradientSum /= rest_density;
+    
+    return -Correction(ind) / (gradientSum + eps);
+}
 
-	x1 = spherePos[id.x]; x1.x = minBounds.x;
-	x2 = spherePos[id.x]; x2.x = maxBounds.x;
+float3 GetForce(int ind)
+{
+    return float3(0.f, -grav, 0.f);
+}
 
-	y1 = spherePos[id.x]; y1.y = minBounds.y;
-	y2 = spherePos[id.x]; y2.y = maxBounds.y;
+float3 CorrectBoundaries(float3 testPos, int ind)
+{
+    float3 corrected = testPos;
+    
+    if (corrected.x < minBounds.x)
+    {
+        corrected.x = minBounds.x + 0.001f;
+        vel[ind].x = 0.f;
+    }
+    else if (corrected.x > maxBounds.x)
+    {
+        corrected.x = maxBounds.x - 0.001f;
+        vel[ind].x = 0.f;
+    }
+    
+    if (corrected.y < minBounds.y)
+    {
+        corrected.y = minBounds.y + 0.001f;
+        vel[ind].y = 0.f;
+    }
+    else if (corrected.y > maxBounds.y)
+    {
+        corrected.y = maxBounds.y - 0.001f;
+        vel[ind].y = 0.f;
+    }
+    
+    if (corrected.z < minBounds.z)
+    {
+        corrected.z = minBounds.z + 0.001f;
+        vel[ind].z = 0.f;
+    }
+    else if (corrected.z > maxBounds.z)
+    {
+        corrected.z = maxBounds.z - 0.001f;
+        vel[ind].z = 0.f;
+    }
+    
+    return corrected - testPos;
+}
 
-	z1 = spherePos[id.x]; z1.z = minBounds.z;
-	z2 = spherePos[id.x]; z2.z = maxBounds.z;
+float SCorr(int ind1, int j, float pressure)
+{
+    float s = adjLists[ind1].smoothKer[j] / pressure;
+    return -k_corr * s * s * s * s;
+}
 
+float3 ViscCorr(int ind)
+{
+    int ind2;
+    float3 corr = 0.f;
+    
+    for (int i = 0; i < adjLists[ind].num; i++)
+    {
+        ind2 = adjLists[ind].list[i];
+        corr += (vel[ind2] - vel[ind]) * adjLists[ind].smoothKer[i];
+    }
+    
+    return corr * 0.006f;
+}
 
-	Update(id.x);
+[numthreads(64, 1, 1)]
+void InitialUpdate(uint3 id : SV_DispatchThreadID)
+{
+    int ind = id.x;
 
-	//check boundary
-	if (spherePos[id.x].x < minBounds.x)
-	{
-		spherePos[id.x].x = minBounds.x + 0.001f;
-		sphereVel[id.x].x *= 0;
-	}
-	else if (spherePos[id.x].x > maxBounds.x)
-	{
-		spherePos[id.x].x = maxBounds.x - 0.001f;
-		sphereVel[id.x].x *= 0;
-	}
+    vel[ind] = vel[ind] + dt * GetForce(ind);
+    newPos[ind] = pos[ind] + vel[ind] * dt;
+    newPos[ind] += CorrectBoundaries(newPos[ind], ind);
+}
 
-	if (spherePos[id.x].y < minBounds.y)
-	{
-		spherePos[id.x].y = minBounds.y + 0.001f;
-		sphereVel[id.x].y *= -boundaryAbs;
-	}
-	else if (spherePos[id.x].y > maxBounds.y)
-	{
-		spherePos[id.x].y = maxBounds.y - 0.001f;
-		sphereVel[id.x].y *= -boundaryAbs;
-	}
+[numthreads(64, 1, 1)]
+void SetAdjLists(uint id : SV_DispatchThreadID)
+{
+    int ind = id.x;
+    int num = 0;
+    
+    for (int i = 0; i < numPoints; i++)
+    {
+        if (i == ind)
+            continue;
+        
+        if (length(newPos[i] - newPos[ind]) < influence_radius)
+        {
+            adjLists[ind].list[num] = i;
+            num++;
+        }
+        
+        if (adjLists[ind].num >= 20) //this is bad
+        {
+            break;
+        }
+    }
+    
+    adjLists[ind].num = num;
 
-	if (spherePos[id.x].z < minBounds.z)
-	{					
-		spherePos[id.x].z = minBounds.z + 0.001f;
-		sphereVel[id.x].z *= 0;
-	}
-	else if (spherePos[id.x].z > maxBounds.z)
-	{
-		spherePos[id.x].z = maxBounds.z - 0.001f;
-		sphereVel[id.x].z *= 0;
-	}
+}
+
+[numthreads(64, 1, 1)]
+void SetCorrections(uint3 id : SV_DispatchThreadID)
+{
+    int ind = id.x;
+    int ind2;
+
+    for (int i = 0; i < adjLists[ind].num; i++)
+    {
+        ind2 = adjLists[ind].list[i];
+        adjLists[ind].smoothKer[i] = Poly6Smooth(length(newPos[ind2] - newPos[ind]));
+        adjLists[ind].kerGrad[i] = KernelGrad(ind, ind2);
+    }
+}
+
+[numthreads(64, 1, 1)]
+void SetScaleFactors(uint3 id : SV_DispatchThreadID)
+{
+    scaleFactors[id.x] = SetScalingFac(id.x);
+}
+
+[numthreads(64, 1, 1)]
+void RunSolver(uint3 id : SV_DispatchThreadID)
+{
+    int ind = id.x;
+    float art_pressure = Poly6Smooth(influence_radius * dq);
+    
+    float3 dp = 0.f;
+    int ind2;
+    
+    for (int i = 0; i < adjLists[ind].num; i++)
+    {
+        ind2 = adjLists[ind].list[i];
+        dp += (scaleFactors[ind] + scaleFactors[ind2] + SCorr(ind, i, art_pressure)) * adjLists[ind].kerGrad[i];
+    }
+
+    dp /= rest_density;
+    
+    //account for boundaries
+    newPos[ind] += dp;
+    newPos[ind] += CorrectBoundaries(newPos[ind], ind);
+}
+
+[numthreads(64, 1, 1)]
+void FinalUpdate(uint3 id : SV_DispatchThreadID)
+{
+    int ind = id.x;
+
+    vel[ind] = (newPos[ind] - pos[ind]) / dt;
+        
+    //apply viscosity
+    vel[ind] += ViscCorr(ind);
+    
+    pos[ind] = newPos[ind];
+
 }

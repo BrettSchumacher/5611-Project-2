@@ -201,7 +201,7 @@ Transform:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 596558967}
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 0, y: 0.5, z: 0}
+  m_LocalPosition: {x: 0, y: 1.5, z: -2.5}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_Children: []
   m_Father: {fileID: 0}
@@ -219,8 +219,76 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 4029084ee6ccc4c44830c9b284ca980d, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  moveSpeed: 3
-  sensitivity: 0.2
+  moveSpeed: 1
+  sensitivity: 2
+--- !u!1 &838392247
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 838392249}
+  - component: {fileID: 838392248}
+  - component: {fileID: 838392250}
+  m_Layer: 0
+  m_Name: Sim
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &838392248
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 838392247}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 6bde4294fa2fb65499c1c28c2a1e6ece, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  EulerShader: {fileID: 7200000, guid: 081c4afda3d27924e8414f1bf93a78db, type: 3}
+  passes: 5
+  rows: 5
+  cols: 5
+  grav: 2
+  drag: 0.97
+  spacing: 0.1
+  avg_height: 0.5
+  slope: 0.2
+  bottomLeft: {x: -1, y: 0, z: -1}
+  waterPtcl: {fileID: 8066575166633529682, guid: 88f0063ba233ca142b77a85b7ae644d8, type: 3}
+--- !u!4 &838392249
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 838392247}
+  m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
+  m_LocalPosition: {x: 0, y: 1, z: 0}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_RootOrder: 4
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!65 &838392250
+BoxCollider:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 838392247}
+  m_Material: {fileID: 0}
+  m_IsTrigger: 0
+  m_Enabled: 1
+  serializedVersion: 2
+  m_Size: {x: 3, y: 2, z: 3}
+  m_Center: {x: 0, y: 0.15, z: 0}
 --- !u!1 &1014177139
 GameObject:
   m_ObjectHideFlags: 0
@@ -326,12 +394,12 @@ GameObject:
   - component: {fileID: 1045451328}
   - component: {fileID: 1045451329}
   m_Layer: 0
-  m_Name: Sim
+  m_Name: OldSim
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!4 &1045451327
 Transform:
   m_ObjectHideFlags: 0
@@ -371,22 +439,18 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 012f990bec42d084086fa26e1975db6e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  waterSimShader: {fileID: 7200000, guid: ec34e517a2d159a479783167fb907a93, type: 3}
-  directionalLight: {fileID: 1014177140}
-  numSpheres: 256
-  waterColor: {r: 0, g: 0, b: 0, a: 0}
+  EulerShader: {fileID: 0}
+  numPtcls: 0
   passes: 10
+  solverIters: 10
   influence_radius: 0.01
-  k_cohesion: 30
-  k_surf: 0
-  cohesion_falloff: 50
-  surf_falloff: 100
-  goal_pressure: 0.6
-  drag: 20
+  rest_density: 1000
   grav: 1
-  boundaryAbs: 0.7
-  box: {fileID: 1045451328}
-  sphere: {fileID: 8066575166633529682, guid: 88f0063ba233ca142b77a85b7ae644d8, type: 3}
+  eps: 600
+  dq: 0.3
+  k_corr: 0.0001
+  spacing: 0.05
+  waterPtcl: {fileID: 0}
 --- !u!1 &1067761814
 GameObject:
   m_ObjectHideFlags: 0
