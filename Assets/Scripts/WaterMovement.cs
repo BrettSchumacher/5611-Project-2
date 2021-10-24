@@ -8,13 +8,14 @@ public class WaterMovement : MonoBehaviour
     public float sensitivity = 100.0f;
 
     private Vector3 prev_mouse = Vector3.zero;
-    private float rotY = 0f;
+    private float rotY;
 
     // Start is called before the first frame update
     void Start()
     {
         //Cursor.lockState = CursorLockMode.Confined;
         Cursor.visible = false;
+        rotY = transform.eulerAngles.x;
     }
 
     // Update is called once per frame
@@ -22,12 +23,6 @@ public class WaterMovement : MonoBehaviour
     {
         HandleMovement();
         HandleLook();
-
-        if (Input.GetKey(KeyCode.Escape))
-        {
-            Application.Quit();
-            Debug.Break();
-        }
     }
 
     void HandleMovement()

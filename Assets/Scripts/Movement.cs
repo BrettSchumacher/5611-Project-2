@@ -6,142 +6,114 @@ public class Movement : MonoBehaviour
 {
     public float moveSpeed = 1f;
     public float sensitivity = 100.0f;
-    public GameObject obstacle;
+    public float obstSpeed = 1f;
 
-    private Vector3 prev_mouse = Vector3.zero;
+    private GameObject obstacle;
+
     private float rotY = 0f;
-    private GameObject moveTarget;
-    private GameObject lookTarget = null;
     private Vector3 obstVel;
+    private Vector3 camVel;
+    private float t_obst;
+    private Animation anim;
 
     // Start is called before the first frame update
     void Start()
     {
-        //Cursor.lockState = CursorLockMode.Confined;
         Cursor.visible = false;
-        moveTarget = gameObject;
+        obstacle = GameObject.FindWithTag("Obstacle");
+        anim = GetComponentInChildren<Animation>();
+        anim.Play();
+        anim["Scene"].speed = 0f;
+        t_obst = 0f;
     }
 
     // Update is called once per frame
     public void UpdateMove(bool paused, float dt)
     {
-        if (paused && moveTarget != gameObject)
-        {
-            moveTarget = gameObject;
-        }
-
-        HandleMovement(moveTarget, dt);
+        HandleMovement(dt);
+        HandleObstacle(dt);
         HandleLook();
-
-        if (Input.GetKey(KeyCode.Escape))
-        {
-            Application.Quit();
-            Debug.Break();
-        }
-
-        Ray look = new Ray(transform.position, transform.forward);
-        RaycastHit hit;
-        if (Physics.Raycast(look, out hit) && hit.collider.gameObject == obstacle)
-        {
-            if (moveTarget != obstacle)
-            {
-                lookTarget = obstacle;
-                obstacle.GetComponent<MeshRenderer>().material.color = Color.black;
-            }
-            else
-            {
-                lookTarget = null;
-                obstacle.GetComponent<MeshRenderer>().material.color = Color.white;
-            }
-        }
-        else
-        {
-            lookTarget = null;
-            if (moveTarget == obstacle)
-            {
-                obstacle.GetComponent<MeshRenderer>().material.color = Color.white;
-            }
-            else
-            {
-                obstacle.GetComponent<MeshRenderer>().material.color = Color.black;
-            }
-        }
-
-        if (Input.GetMouseButtonUp(1))
-        {
-            print("click");
-            if (moveTarget != gameObject)
-            {
-                print("deselect");
-                moveTarget = gameObject;
-            }
-            else if (lookTarget != null)
-            {
-                moveTarget = obstacle;
-                print("select");
-            }
-        }
     }
 
-    void HandleMovement(GameObject target, float dt)
+    void HandleMovement(float dt)
     {
-        Vector3 vel = Vector3.zero;
+        //set camera velocity
+        Vector3 camVel = Vector3.zero;
         Vector3 forward = Vector3.ProjectOnPlane(transform.forward, Vector3.up).normalized;
         Vector3 right = Vector3.Cross(Vector3.up, forward);
         if (Input.GetKey(KeyCode.W))
         {
-            vel += forward;
+            camVel += forward;
         }
         if (Input.GetKey(KeyCode.A))
         {
-            vel -= right;
+            camVel -= right;
         }
         if (Input.GetKey(KeyCode.S))
         {
-            vel -= forward;
+            camVel -= forward;
         }
         if (Input.GetKey(KeyCode.D))
         {
-            vel += right;
+            camVel += right;
         }
 
-        vel.Normalize();
+        camVel.Normalize();
 
-        vel *= moveSpeed;
+        camVel *= moveSpeed;
 
         if (Input.GetKey(KeyCode.LeftShift))
         {
-            vel -= Vector3.up;
+            camVel -= Vector3.up;
         }
         if (Input.GetKey(KeyCode.Space))
         {
-            vel += Vector3.up;
+            camVel += Vector3.up;
         }
+        transform.position += camVel * dt;
+    }
 
-        if (moveTarget == obstacle)
+    void HandleObstacle(float dt)
+    {
+        //t_obst will be between [0,1] and determines where in the extend animation we are
+        if (Input.GetMouseButton(1))
         {
-            obstVel = vel;
+            t_obst += dt * obstSpeed;
         }
         else
         {
-            obstVel = Vector3.zero;
+            t_obst -= dt * obstSpeed;
         }
 
-        moveTarget.transform.position += vel * dt;
+        t_obst = Mathf.Clamp01(t_obst);
+
+        //record current position to be able to calculate velocity after animation update
+        Vector3 prev = obstacle.transform.position;
+
+        //set animation based on t_obst
+        anim["Scene"].normalizedTime = t_obst;
+
+        obstVel = (obstacle.transform.position - prev) / dt;
     }
 
     void HandleLook()
     {
+        //basic first person camera rotation using mouse
         Vector3 mouseDelta = new Vector2(Input.GetAxis("Mouse X"), Input.GetAxis("Mouse Y"));
         rotY -= mouseDelta.y * sensitivity;
         rotY = Mathf.Clamp(rotY, -90f, 90f);
         float rotX = transform.eulerAngles.y + mouseDelta.x * sensitivity;
         transform.eulerAngles = new Vector3(rotY, rotX, 0f);
-        prev_mouse = Input.mousePosition;
     }
 
     public Vector3 getObstVel()
     {
-        return obstVel;
+        //since obstacle is attached to camera, add their velocities together
+        return obstVel + camVel;
+    }
+
+    public GameObject GetObstacle()
+    {
+        return obstacle;
     }
 }

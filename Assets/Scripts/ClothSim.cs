@@ -1,7 +1,8 @@
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
-
+using UnityEngine.SceneManagement;
+using TMPro;
 
 
 public class ClothSim : MonoBehaviour
@@ -25,23 +26,28 @@ public class ClothSim : MonoBehaviour
     public float absorbtion = 0.5f;
     public float nodeRadius = 0.05f;
     public float tearThresh = 0.5f;
+    public float fanSpeed = 1f;
     public GameObject sphere;
     public GameObject spring;
     public ComputeShader ClothSimShader;
     public Movement move;
+    public TextMeshProUGUI pauseText;
+    public TextMeshProUGUI windText;
+    public TextMeshProUGUI fpsText;
 
-    private bool paused = false;
-    //private GameObject[] spheres;
-    //private Dictionary<GameObject, (int, int)> springToInd;
-    //private Dictionary<(int, int), GameObject> indToSpring;
+    private bool paused = true;
     private Transform mainCam;
     private GameObject selectedSpring;
     private GameObject obstacle;
+    private Transform fanBlades;
+    private float fpsTimer = 0f;
+    private int fpsCounter = 0;
     
     private Vector3[] oldPos;
     private Vector3[] pos;
     private Vector3[] oldVel;
     private Vector3[] vel;
+
     // the way I store neighbor information is in the bit representation of an int
     // if a node can be connected along the 4 cardinal directions as well as the diagonals
     // the first bit of the integer refers to the right connection, it is 1 if connected, 0 otherwise
@@ -126,6 +132,8 @@ public class ClothSim : MonoBehaviour
         return result;
     }
 
+    //these functions use bit masks to see if the specified bit for that connection
+    //inside neighborVal is set to a 1 or not
     bool right(int neighborVal)
     {
         return (neighborVal & 1) != 0;
@@ -156,12 +164,12 @@ public class ClothSim : MonoBehaviour
         return (neighborVal & (1 << 6)) != 0;
     }
 
-
-    // Start is called before the first frame update
     void Start()
     {
         mainCam = Camera.main.transform;
-        obstacle = move.obstacle;
+        obstacle = move.GetObstacle();
+        fanBlades = GameObject.FindWithTag("FanBlades").transform;
+        pauseText.enabled = paused;
 
         numNodes = rows * cols;
         oldPos = new Vector3[numNodes];
@@ -172,21 +180,19 @@ public class ClothSim : MonoBehaviour
 
         InitializeLists();
 
-        //spheres = new GameObject[numNodes];
-        //springToInd = new Dictionary<GameObject, (int, int)>();
-        //indToSpring = new Dictionary<(int, int), GameObject>();
-
         ClothSimShader.SetFloat("l0", l0);
         ClothSimShader.SetFloat("k_spring", k_spring / mass);
         ClothSimShader.SetFloat("k_sdrag", k_sdrag / mass);
         ClothSimShader.SetFloat("k_adrag", k_adrag / mass);
         ClothSimShader.SetFloat("grav", grav);
         ClothSimShader.SetInt("cols", cols);
-        ClothSimShader.SetFloat("obstRadius", obstacle.GetComponent<SphereCollider>().radius);
+        ClothSimShader.SetFloat("obstRadius", obstacle.GetComponent<SphereCollider>().radius * obstacle.transform.lossyScale.x);
         ClothSimShader.SetVector("obstVel", move.getObstVel());
         ClothSimShader.SetFloat("nodeRadius", nodeRadius);
         ClothSimShader.SetFloat("absorbtion", absorbtion);
         ClothSimShader.SetFloat("tearThresh", tearThresh);
+
+        RenderMesh();
     }
 
     void InitializeLists()
@@ -205,46 +211,17 @@ public class ClothSim : MonoBehaviour
             oldVel[ind] = vel[ind];
             neighborVal = get_neighbors(i, j);
             neighbors[ind] = neighborVal;
-            //print(ind + ": " + right(neighborVal) + ", " + down_right(neighborVal) + ", " + down(neighborVal) + ", " + down_left(neighborVal));
-            /*
-            if (right(neighborVal))
-            {
-                tempSpring = Instantiate(spring);
-                springToInd[tempSpring] = (ind, ind + 1);
-                indToSpring[(ind, ind + 1)] = tempSpring;
-            }
-            if (down_right(neighborVal))
-            {
-                tempSpring = Instantiate(spring);
-                springToInd[tempSpring] = (ind, ind + cols + 1);
-                indToSpring[(ind, ind + cols + 1)] = tempSpring;
-            }
-            if (down(neighborVal))
-            {
-                tempSpring = Instantiate(spring);
-                springToInd[tempSpring] = (ind, ind + cols);
-                indToSpring[(ind, ind + cols)] = tempSpring;
-            }
-            if (down_left(neighborVal))
-            {
-                tempSpring = Instantiate(spring);
-                springToInd[tempSpring] = (ind, ind + cols - 1);
-                indToSpring[(ind, ind + cols - 1)] = tempSpring;
-            }
-            spheres[ind] = Instantiate(sphere);
-            spheres[ind].transform.parent = transform;
-            */
         }
     }
 
     void Update()
     {
-        HandleInputs();
+        // only inputs and movement handled on update, simulation updated on fixed update
+        HandleInputs(Time.deltaTime);
 
         move.UpdateMove(paused, Time.deltaTime);
     }
 
-    // Update is called once per frame
     void FixedUpdate()
     {
         if (paused)
@@ -254,17 +231,20 @@ public class ClothSim : MonoBehaviour
 
         Vector3 wind = Vector3.zero;
 
+        //if player is left-clicking, set the wind speed and spin the fan blades
         if (Input.GetMouseButton(0))
         {
             wind = mainCam.forward * windSpeed;
             wind += Vector3.one * windNoise * (2f * Mathf.PerlinNoise(3f * Time.time, Time.time) - 1f);
-        }
 
+            fanBlades.localEulerAngles += new Vector3(0f, fanSpeed * Time.fixedDeltaTime * windSpeed / 50f);
+        }
 
         ClothSimShader.SetVector("wind", wind);
 
         float dt = Time.fixedDeltaTime / passes;
 
+        //deal with buffers to send to GPU
         printNodes();
         ClothSimShader.SetFloat("dt", dt);
         ComputeBuffer oldPosBuffer = new ComputeBuffer(numNodes, 4 * 3);
@@ -283,13 +263,15 @@ public class ClothSim : MonoBehaviour
         ClothSimShader.SetBuffer(0, "vel", velBuffer);
         ClothSimShader.SetBuffer(0, "neighbors", neighborsBuffer);
 
+        //run the simulation
         for (int i = 0; i < passes; i++)
         {
-            //nodesUpdate(Time.deltaTime / runs);
+            //nodesUpdate(Time.deltaTime / runs);;
             ClothSimShader.SetVector("obstPos", obstacle.transform.position + move.getObstVel() * i * dt);
             ClothSimShader.Dispatch(0, Mathf.CeilToInt(rows / 8.0f), Mathf.CeilToInt(cols / 8.0f), 1);
         }
 
+        //collect data from the GPU
         oldPosBuffer.GetData(oldPos);
         posBuffer.GetData(pos);
         oldVelBuffer.GetData(oldVel);
@@ -303,82 +285,47 @@ public class ClothSim : MonoBehaviour
         neighborsBuffer.Release();
 
         RenderMesh();
-
-        Ray look = new Ray(mainCam.position, mainCam.forward);
-        RaycastHit hit;
-        if (Physics.Raycast(look, out hit) && hit.collider.gameObject.tag == "Spring")
-        {
-            if (selectedSpring != null)
-            {
-                selectedSpring.GetComponent<MeshRenderer>().material.color = Color.white;
-            }
-            selectedSpring = hit.collider.gameObject;
-            selectedSpring.GetComponent<MeshRenderer>().material.color = Color.red;
-        }
-        else
-        {
-            if (selectedSpring != null)
-            {
-                selectedSpring.GetComponent<MeshRenderer>().material.color = Color.white;
-            }
-            selectedSpring = null;
-        }
-
-        /*
-        int ind1;
-        int ind2;
-        //delete spring
-        if (Input.GetMouseButton(1) && selectedSpring != null)
-        {
-            ind1 = springToInd[selectedSpring].Item1;
-            ind2 = springToInd[selectedSpring].Item2;
-            //first check if right or down-right
-            if (col(ind1) < col(ind2))
-            {
-                if (row(ind1) == row(ind2)) //same row means it's the right connection
-                {
-                    neighbors[ind1] &= ~(1); //set right bit to be 0
-                    neighbors[ind2] &= ~(1 << 4); 
-                }
-                else
-                {
-                    neighbors[ind1] &= ~(1 << 1); //set down right bit to 0
-                    neighbors[ind2] &= ~(1 << 5);
-                }
-            }
-            else //else it's down/down-left
-            {
-                if (col(ind1) == col(ind2)) //down case
-                {
-                    neighbors[ind1] &= ~(1 << 2);
-                    neighbors[ind2] &= ~(1 << 6);
-                }
-                else
-                {
-                    neighbors[ind1] &= ~(1 << 3);
-                    neighbors[ind2] &= ~(1 << 7);
-                }
-            }
-            indToSpring.Remove((ind1, ind2));
-            springToInd.Remove(selectedSpring);
-            Destroy(selectedSpring);
-            selectedSpring = null;
-        }
-        */
     }
 
-    void HandleInputs()
+    void HandleInputs(float dt)
     {
-        if (Input.GetKeyDown(KeyCode.P))
+        if (Input.GetKey(KeyCode.Escape))
+        {
+            Application.Quit();
+            Debug.Break();
+        }
+        if (Input.GetKeyDown(KeyCode.Alpha2))
+        {
+            SceneManager.LoadScene(1);
+        }
+        if (Input.GetKeyDown(KeyCode.E))
         {
             paused = !paused;
+            pauseText.enabled = paused;
         }
         if (Input.GetKeyDown(KeyCode.R))
         {
             InitializeLists();
         }
+
+        windSpeed += Input.mouseScrollDelta.y;
+        windSpeed = Mathf.Max(0f, windSpeed);
+        windText.text = "Wind Speed: " + (windSpeed / 10f).ToString("F2");
+
+        if (fpsTimer < 0.5f)
+        {
+            fpsTimer += dt;
+            fpsCounter++;
+        }
+        else
+        {
+            fpsText.text = "FPS: " + (fpsCounter / fpsTimer).ToString("F0");
+            fpsTimer = 0f;
+            fpsCounter = 0;
+        }
     }
 
+    //debug function for printing node positions
     void printNodes()
     {
         string result = "\nNodes: ";
@@ -405,6 +352,7 @@ public class ClothSim : MonoBehaviour
             tris = new List<int>();
         }
 
+        //clear mesh data
         norms.Clear();
         verts.Clear();
         uvs.Clear();
@@ -412,20 +360,21 @@ public class ClothSim : MonoBehaviour
 
         int neighborVal;
 
-        verts.AddRange(pos);
+        //add positions to verts
         verts.AddRange(pos);
 
         Vector3 norm1, norm2 , norm3, norm4;
 
-        //final pass, compute triangles
+        //go through and make triangles, normals are calculated as the average of the normals
+        //around that vertex, resulting in smooth shading for the cloth
         for (int i = 0; i < numNodes; i++)
         {
             neighborVal = neighbors[i];
-            norm1 = norm2 = norm3 = norm4 =Vector3.zero;
+            norm1 = norm2 = norm3 = norm4 = Vector3.zero;
 
             //draw lower right tri if there are springs there
             //for all triangles we draw 2 that are exactly the same except
-            //with opposite normals since unity will cull the opposite side
+            //with opposite normals so that it renders on both sides
             if (right(neighborVal) && down(neighborVal))
             {
                 tris.Add(i); tris.Add(i + 1); tris.Add(i + cols);
@@ -441,6 +390,7 @@ public class ClothSim : MonoBehaviour
                 norm2 = Vector3.Cross(pos[i - cols] - pos[i], pos[i - 1] - pos[i]).normalized;
             }
 
+            //go through other 2 triangles just for normals
             if (right(neighborVal) && up(neighborVal))
             {
                 norm3 = Vector3.Cross(pos[i + 1] - pos[i], pos[i - cols] - pos[i]).normalized;
@@ -455,12 +405,16 @@ public class ClothSim : MonoBehaviour
             uvs.Add(UV(i));
         }
 
+        //add pos again to represent the back side of the mesh, and copy over normals (but negative) and UVs
+        verts.AddRange(pos);
         for (int i = 0; i < numNodes; i++)
         {
             norms.Add(-norms[i]);
             uvs.Add(UV(i));
         }
 
+
+        //apply data to mesh
         clothMesh.Clear();
         clothMesh.vertices = verts.ToArray();
         clothMesh.normals = norms.ToArray();
@@ -475,142 +429,4 @@ public class ClothSim : MonoBehaviour
         uv.y = -row(ind) / (cols - 1f);
         return uv;
     }
-
-
-
-    /*
-    void DrawWireMesh()
-    {
-        int ind;
-        int neighbor_val;
-        GameObject tempSpring;
-        Vector3 dist;
-
-        for (int i = 0; i < rows; i++)
-        {
-            for (int j = 0; j < cols; j++)
-            {
-                ind = index(i, j);
-                neighbor_val = neighbors[ind];
-                spheres[ind].transform.position = pos[ind];
-                if (right(neighbor_val))
-                {
-                    dist = pos[ind + 1] - pos[ind];
-                    tempSpring = indToSpring[(ind, ind + 1)];
-                    tempSpring.transform.position = pos[ind] + 0.5f * dist;
-                    tempSpring.transform.LookAt(pos[ind + 1], Vector3.up);
-                    tempSpring.transform.localScale = new Vector3(0.001f, 0.001f, dist.magnitude);
-                }
-                if (down_right(neighbor_val))
-                {
-                    dist = pos[ind + cols + 1] - pos[ind];
-                    tempSpring = indToSpring[(ind, ind + cols + 1)];
-                    tempSpring.transform.position = pos[ind] + 0.5f * dist;
-                    tempSpring.transform.LookAt(pos[ind + cols + 1], Vector3.up);
-                    tempSpring.transform.localScale = new Vector3(0.001f, 0.001f, dist.magnitude);
-                }
-                if (down(neighbor_val))
-                {
-                    dist = pos[ind + cols] - pos[ind];
-                    tempSpring = indToSpring[(ind, ind + cols)];
-                    tempSpring.transform.position = pos[ind] + 0.5f * dist;
-                    tempSpring.transform.LookAt(pos[ind + cols], Vector3.up);
-                    tempSpring.transform.localScale = new Vector3(0.001f, 0.001f, dist.magnitude);
-                }
-                if (down_left(neighbor_val))
-                {
-                    dist = pos[ind + cols - 1] - pos[ind];
-                    tempSpring = indToSpring[(ind, ind + cols - 1)];
-                    tempSpring.transform.position = pos[ind] + 0.5f * dist;
-                    tempSpring.transform.LookAt(pos[ind + cols - 1], Vector3.up);
-                    tempSpring.transform.localScale = new Vector3(0.001f, 0.001f, dist.magnitude);
-                }
-            }
-        }
-    }
-
-    /*
-    void nodesUpdate(float dt)
-    {
-        //run rk4
-        for (int i = 0; i < rows; i++)
-        {
-            for (int j = 0; j < cols; j++)
-            {
-                if (nodes[i, j].anchor == 0) RK4(ref nodes[i, j], dt);
-            }
-        }
-
-        //set oldPos and draw nodes
-        for (int i = 0; i < rows; i++)
-        {
-            for (int j = 0; j < cols; j++)
-            {
-                nodes[i, j].oldPos = nodes[i, j].pos;
-                nodes[i, j].oldVel = nodes[i, j].vel;
-            }
-        }
-    }
-
-    void RK4(ref Node node, float dt)
-    {
-        Vector3 newVel;
-        Vector3 k1 = GetAcc(ref node, node.pos, node.vel);
-        newVel = node.vel + k1 * dt / 2.0f;
-        Vector3 k2 = GetAcc(ref node, node.pos + newVel * dt / 2.0f, newVel);
-        newVel = node.vel + k2 * dt / 2.0f;
-        Vector3 k3 = GetAcc(ref node, node.pos + newVel * dt / 2.0f, newVel);
-        newVel = node.vel + k3 * dt;
-        Vector3 k4 = GetAcc(ref node, node.pos + newVel * dt, newVel);
-        node.vel += dt / 6.0f * (k1 + 2.0f * k2 + 2.0f * k3 + k4);
-        node.pos += dt * node.vel;
-    }
-
-    Vector3 GetAcc(ref Node node, Vector3 newPos, Vector3 newVel)
-    {
-        Vector3 acc = Vector3.zero;
-        Vector3 l;
-        List<Node> neighbors = new List<Node>();
-        if (node.up != 0) neighbors.Add(nodes[node.row, node.col - 1]);
-        if (node.right != 0) neighbors.Add(nodes[node.row + 1, node.col]);
-        if (node.down != 0) neighbors.Add(nodes[node.row, node.col + 1]);
-        if (node.left != 0) neighbors.Add(nodes[node.row - 1, node.col]);
-
-        foreach (Node other in neighbors)
-        {
-            l = newPos - other.oldPos;
-            acc -= k_spring * (l - l0 * l.normalized);
-            acc -= k_sdrag * (newVel - other.oldVel).magnitude * newVel.normalized;
-            acc -= k_adrag * newVel;
-            acc -= Vector3.up * grav;
-        }
-
-        return acc;
-    }
-
-    private void OnDrawGizmos()
-    {
-        if (indToSpring == null)
-        {
-            return;
-        }
-        int ind;
-        for (int i = 0; i < rows; i++)
-        {
-            for (int j = 0; j < cols; j++)
-            {
-                ind = index(i, j);
-                //print("(" + i + ", " + j + "): right -> " + temp.right + ", down -> " + temp.down);
-                if (temp.right > (byte) 0)
-                {
-                    Gizmos.DrawLine(temp.pos, nodes[temp.row, temp.col + 1].pos);
-                }
-                if (temp.down > (byte) 0)
-                {
-                    Gizmos.DrawLine(temp.pos, nodes[temp.row + 1, temp.col].pos);
-                }
-            }
-        }
-    }
-    */
 }

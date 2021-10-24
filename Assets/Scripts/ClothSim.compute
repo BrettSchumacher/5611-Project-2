@@ -72,6 +72,7 @@ bool anchored(int neighborVal)
 
 float3 GetContr(int ind1, int ind2, float3 newPos, float3 newVel, float restl, inout float stretch)
 {
+    //calculate contribution from a single spring, modify the stretch to determine the the spring breaks
     float3 l = newPos - oldPos[ind2];
     float3 acc = -k_spring * (l - restl * normalize(l));
     if (length(l) > 0.01f)
@@ -86,6 +87,7 @@ float3 GetContr(int ind1, int ind2, float3 newPos, float3 newVel, float restl, i
 
 float3 GetSpringAcc(int ind, float3 newPos, float3 newVel)
 {
+    //function to calculate spring acceleration, go through all neighbors and add their acc
     float3 acc = float3(0.0f, 0.0f, 0.0f);
     int neighborVal = neighbors[ind];
     float stretch;
@@ -179,9 +181,12 @@ float3 GetWindAcc(int ind, float3 newPos, float3 newVel)
     float3 vel;
     float3 area;
     int neighborVal = neighbors[ind];
-    int fac = 4 - right(neighborVal) + up(neighborVal) + left(neighborVal) + down(neighborVal);
+    
+    //fac compensates for edges/corners having less surface area, 
+    int fac = 4 - right(neighborVal) - up(neighborVal) - left(neighborVal) - down(neighborVal);
     fac = pow(2, fac);
 
+    //now calculate acceleration from the four neighboring triangles
     //upper right
     if (right(neighborVal) && up(neighborVal))
     {
@@ -229,6 +234,7 @@ float3 GetAcc(int ind, float3 newPos, float3 newVel)
 {
     float3 acc = float3(0.0f, 0.0f, 0.0f);
 
+    //total up acceleration from all sources
     acc += GetSpringAcc(ind, newPos, newVel);
     acc += GetWindAcc(ind, newPos, newVel);
     acc += float3(0.f, -grav, 0.0f);
@@ -238,6 +244,7 @@ float3 GetAcc(int ind, float3 newPos, float3 newVel)
 
 void RK4(int ind)
 {
+    //I use RK4 to estimate the new velocity, using eulerian approximation for the position based on the velocity
     float3 newVel;
     float3 k1 = GetAcc(ind, pos[ind], vel[ind]);
     newVel = vel[ind] + k1 * dt / 2.0f;
@@ -254,16 +261,21 @@ void RK4(int ind)
 void CSMain (uint3 id : SV_DispatchThreadID)
 {
     int ind = id.x * cols + id.y;
+    
+    //don't bother updating if the point is anchored
     if (anchored(neighbors[ind]))
     {
         return;
     }
 
+    //I should probably do this in a separate kernel, but oh well
     oldPos[ind] = pos[ind];
     oldVel[ind] = vel[ind];
 
+    //use RK4 to update node position
     RK4(ind);
 
+    //move node based on collision with the obstacle
     float3 dir = pos[ind] - obstPos;
     float r = obstRadius + nodeRadius;
     if (length(dir) < r)
